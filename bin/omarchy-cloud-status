@@ -103,47 +103,61 @@ def managed_remote_names():
         return set()
 
 
-def read_remotes(path, managed_names):
-    """Parse managed remote names and types. Never returns secrets."""
-    if not path.exists() or not managed_names:
-        return []
+def remote_info(name, section):
+    """Return display metadata for one rclone section, never its secrets."""
+    backend = section.get("type", "")
+    # Most browser-authenticated providers store `token`; iCloud's SRP/2FA
+    # flow stores a trust token instead.
+    auth_key = "trust_token" if backend == "iclouddrive" else "token"
+    return {
+        "name": name,
+        "type": backend,
+        # A provider name reads better than a remote id, but only while
+        # it identifies one service. Backends we have no name for fall
+        # back to what the user called it, which beats showing them the
+        # rclone backend id.
+        "label": PROVIDER_LABELS.get(backend, name),
+        "hasAuth": bool(section.get(auth_key)),
+    }
+
+
+def read_remote_groups(path, managed_names):
+    """Parse managed and existing unmanaged remotes without returning secrets."""
+    if not path.exists():
+        return [], []
     parser = configparser.ConfigParser(interpolation=None)
     try:
         parser.read(path, encoding="utf-8")
     except (OSError, configparser.Error):
-        return []
+        return [], []
 
-    remotes = []
+    managed = []
+    unmanaged = []
     for name in parser.sections():
-        if name not in managed_names:
+        if not REMOTE_NAME_PATTERN.fullmatch(name):
             continue
-        backend = parser[name].get("type", "")
-        # Most browser-authenticated providers store `token`; iCloud's SRP/2FA
-        # flow stores a trust token instead.
-        auth_key = "trust_token" if backend == "iclouddrive" else "token"
-        remotes.append(
-            {
-                "name": name,
-                "type": backend,
-                # A provider name reads better than a remote id, but only while
-                # it identifies one service. Backends we have no name for fall
-                # back to what the user called it, which beats showing them the
-                # rclone backend id.
-                "label": PROVIDER_LABELS.get(backend, name),
-                "hasAuth": bool(parser[name].get(auth_key)),
-            }
-        )
+        remote = remote_info(name, parser[name])
+        if name in managed_names:
+            managed.append(remote)
+        else:
+            unmanaged.append(remote)
 
     # Two accounts on the same provider would otherwise be two rows both
-    # labelled "Google Drive", with nothing to tell them apart.
+    # labelled "Google Drive", with nothing to tell them apart. Include
+    # unmanaged remotes so an import candidate is distinguishable too.
     counts = {}
-    for remote in remotes:
+    for remote in managed + unmanaged:
         counts[remote["label"]] = counts.get(remote["label"], 0) + 1
-    for remote in remotes:
+    for remote in managed + unmanaged:
         if counts[remote["label"]] > 1 and remote["label"] != remote["name"]:
             remote["label"] = f"{remote['label']} ({remote['name']})"
 
-    return remotes
+    return managed, unmanaged
+
+
+def read_remotes(path, managed_names):
+    """Parse managed remote names and types. Kept as a small compatibility wrapper."""
+    return read_remote_groups(path, managed_names)[0]
 
 
 def mounted_paths():
@@ -375,6 +389,7 @@ def main():
             "mountRoot": str(root),
             "unitInstalled": False,
             "remotes": [],
+            "unmanagedRemotes": [],
         }))
         return
 
@@ -385,7 +400,9 @@ def main():
         version = first[1] if len(first) > 1 else ""
 
     rclone_config = config_path()
-    remotes = read_remotes(rclone_config, managed_remote_names())
+    remotes, unmanaged_remotes = read_remote_groups(
+        rclone_config, managed_remote_names()
+    )
     live = mounted_paths()
     states = unit_states([r["name"] for r in remotes])
 
@@ -445,6 +462,7 @@ def main():
         "mountRoot": str(root),
         "unitInstalled": unit_installed,
         "remotes": rows,
+        "unmanagedRemotes": unmanaged_remotes,
     }))
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -65,6 +66,34 @@ class MountInfoTests(unittest.TestCase):
             paths = status.mounted_paths()
 
         self.assertEqual(paths, {"/tmp/Café/My Drive"})
+
+
+class RemoteDiscoveryTests(unittest.TestCase):
+    def test_separates_existing_remotes_without_returning_secrets(self):
+        config = """\
+[owned]
+type = onedrive
+token = encrypted-owned-token
+
+[existing]
+type = onedrive
+token = encrypted-existing-token
+
+[not-a-valid-remote!]
+type = onedrive
+token = encrypted-invalid-token
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rclone.conf"
+            path.write_text(config, encoding="utf-8")
+
+            managed, unmanaged = status.read_remote_groups(path, {"owned"})
+
+        self.assertEqual([remote["name"] for remote in managed], ["owned"])
+        self.assertEqual([remote["name"] for remote in unmanaged], ["existing"])
+        self.assertTrue(unmanaged[0]["hasAuth"])
+        self.assertNotIn("token", unmanaged[0])
+        self.assertEqual(unmanaged[0]["type"], "onedrive")
 
 
 if __name__ == "__main__":

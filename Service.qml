@@ -28,6 +28,7 @@ Item {
   property string rcloneVersion: ""
   property string mountRoot: ""
   property var remotes: []
+  property var unmanagedRemotes: []
   property bool refreshing: false
   property string lastError: ""
   property string actionStatus: ""
@@ -105,6 +106,7 @@ Item {
     rcloneVersion = String(parsed.rcloneVersion || "")
     mountRoot = String(parsed.mountRoot || "")
     remotes = parsed.remotes || []
+    unmanagedRemotes = parsed.unmanagedRemotes || []
     lastError = ""
   }
 
@@ -193,6 +195,13 @@ Item {
     actionStatus = "Opening setup…"
     actionStatusTimer.restart()
     runInTerminal("omarchy-cloud-connect", [])
+  }
+
+  function importService(remote) {
+    if (!remote || !remote.name) return
+    actionStatus = "Checking existing rclone remote…"
+    actionStatusTimer.restart()
+    runInTerminal("omarchy-cloud-import", [remote.name])
   }
 
   function configure(remote) {

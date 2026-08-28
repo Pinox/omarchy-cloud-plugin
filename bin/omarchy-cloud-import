@@ -1,0 +1,119 @@
+#!/bin/bash
+#
+# Adopt an existing rclone remote into Omarchy Cloud.
+#
+# Import is deliberately explicit: an existing rclone remote may belong to
+# another tool, so the plugin must never silently mount, rewrite, or delete
+# it. This script only writes the plugin's non-secret ownership record after
+# proving that rclone can open the remote.
+#
+set -uo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-cloud"
+REMOTE_DIR="$CONFIG_DIR/remotes"
+BIN_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+
+MOUNT="$BIN_DIR/omarchy-cloud-mount"
+BOOKMARK="$BIN_DIR/omarchy-cloud-bookmark"
+
+# shellcheck source=omarchy-cloud-ui.sh
+source "$BIN_DIR/omarchy-cloud-ui.sh"
+trap hold_open EXIT
+
+name="${1:-}"
+if [[ -z "$name" || ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+  bad "Usage: omarchy-cloud-import <existing-rclone-remote>"
+  exit 1
+fi
+
+remote_file="$REMOTE_DIR/$name.conf"
+if [[ -e "$remote_file" || -L "$remote_file" ]]; then
+  bad "'$name' is already managed by Omarchy Cloud."
+  exit 1
+fi
+
+if ! remotes="$(rclone listremotes 2>/dev/null)" ||
+    ! grep -Fqx "$name:" <<<"$remotes"; then
+  bad "No rclone remote called '$name' was found."
+  exit 1
+fi
+
+# Redacted output keeps the token out of this script's output and process
+# logs. The validation below is what catches stale provider-specific config.
+remote_type="$(rclone config redacted "$name" 2>/dev/null |
+  awk -F' = ' '/^type/ {print $2; exit}')"
+if [[ -z "$remote_type" ]]; then
+  bad "Could not read the type of rclone remote '$name'."
+  exit 1
+fi
+
+heading "Checking $name"
+probe_output=""
+if ! probe_output="$(rclone lsd "$name:" --max-depth 1 \
+    --retries 1 --low-level-retries 1 --timeout 20s 2>&1)"; then
+  bad "rclone could not open '$name'."
+  [[ -n "$probe_output" ]] && printf '%s\n' "$probe_output" | tail -n 8
+  echo
+  say "Repair the remote with 'rclone config' or sign in again, then retry import."
+  exit 1
+fi
+
+label="$name"
+case "$remote_type" in
+  drive) label="Google Drive" ;;
+  dropbox) label="Dropbox" ;;
+  onedrive) label="OneDrive" ;;
+  box) label="Box" ;;
+  pcloud) label="pCloud" ;;
+  iclouddrive) label="iCloud Drive" ;;
+esac
+
+mkdir -p "$REMOTE_DIR" || {
+  bad "Could not create the Omarchy Cloud state directory."
+  exit 1
+}
+
+umask 077
+tmp="$(mktemp "$REMOTE_DIR/.$name.XXXXXX")" || {
+  bad "Could not create the Omarchy Cloud ownership record."
+  exit 1
+}
+if ! {
+  printf '# Written by omarchy-cloud-import for the %q remote.\n' "$name"
+  echo '# extra_flags is appended to the rclone mount command line.'
+  printf 'label=%q\n' "$label"
+  printf 'extra_flags=%q\n' ""
+} >"$tmp"; then
+  rm -f "$tmp"
+  bad "Could not write the Omarchy Cloud ownership record."
+  exit 1
+fi
+chmod 600 "$tmp" || { rm -f "$tmp"; bad "Could not secure the ownership record."; exit 1; }
+mv "$tmp" "$remote_file" || {
+  rm -f "$tmp"
+  bad "Could not save the Omarchy Cloud ownership record."
+  exit 1
+}
+
+good "Existing rclone remote verified."
+
+if ! "$MOUNT" install-unit >/dev/null; then
+  bad "Could not install the Omarchy Cloud mount service."
+  exit 1
+fi
+if ! "$MOUNT" enable "$name"; then
+  bad "Remote imported, but the mount could not be started."
+  echo "Use the Cloud panel's Mount now action after fixing the service."
+  exit 1
+fi
+
+mount_root="$HOME/Cloud"
+# shellcheck source=/dev/null
+[[ -f "$CONFIG_DIR/settings.conf" ]] && source "$CONFIG_DIR/settings.conf"
+mount_root="${MOUNT_ROOT:-$mount_root}"
+mount_root="${mount_root/#\~/$HOME}"
+if ! "$BOOKMARK" add "$mount_root/$name" "$label" 2>/dev/null; then
+  warn "The service is mounted, but could not be added to the Files sidebar."
+fi
+
+good "$label imported and mounted at $mount_root/$name."

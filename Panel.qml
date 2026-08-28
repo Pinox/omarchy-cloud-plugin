@@ -35,19 +35,26 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var remotes: cloud ? cloud.remotes : []
+  readonly property var unmanagedRemotes: cloud ? cloud.unmanagedRemotes : []
   readonly property bool rcloneInstalled: cloud ? cloud.rcloneInstalled : true
   readonly property int mountedCount: Model.mountedCount(remotes)
 
-  // Focusable rows: one per remote, then the connect row. With rclone missing
-  // there is exactly one thing to do, so the list collapses to it.
-  readonly property int rowCount: rcloneInstalled ? remotes.length + 1 : 1
-  readonly property int connectIndex: remotes.length
+  // Focusable rows: managed remotes, import candidates, then the connect row.
+  // With rclone missing there is exactly one thing to do, so the list collapses
+  // to it.
+  readonly property int importStartIndex: remotes.length
+  readonly property int connectIndex: remotes.length + unmanagedRemotes.length
+  readonly property int rowCount: rcloneInstalled ? connectIndex + 1 : 1
 
   property int cursorIndex: 0
   property bool cursorActive: false
 
   readonly property string heroMeta: {
     if (!rcloneInstalled) return "rclone not installed"
+    if (remotes.length === 0 && unmanagedRemotes.length > 0)
+      return unmanagedRemotes.length === 1
+        ? "1 existing rclone service"
+        : unmanagedRemotes.length + " existing rclone services"
     if (remotes.length === 0) return "No services connected"
     if (mountedCount === remotes.length) return remotes.length === 1
       ? "1 service mounted"
@@ -79,7 +86,11 @@ Panel {
       connectService()
       return
     }
-    primaryAction(remotes[cursorIndex])
+    if (cursorIndex < remotes.length) {
+      primaryAction(remotes[cursorIndex])
+      return
+    }
+    importService(unmanagedRemotes[cursorIndex - importStartIndex])
   }
 
   // Anything that opens a window elsewhere closes the panel first. The panel is
@@ -90,6 +101,12 @@ Panel {
     if (!cloud) return
     close()
     cloud.connectService()
+  }
+
+  function importService(remote) {
+    if (!cloud) return
+    close()
+    cloud.importService(remote)
   }
 
   function installRclone() {
@@ -142,7 +159,10 @@ Panel {
   }
 
   function scrollCursorIntoView() {
-    if (cursorIndex < remoteColumn.children.length) scrollItemIntoView(remoteColumn.children[cursorIndex])
+    if (cursorIndex < remotes.length)
+      scrollItemIntoView(remoteRepeater.itemAt(cursorIndex))
+    else if (cursorIndex < connectIndex)
+      scrollItemIntoView(importRepeater.itemAt(cursorIndex - importStartIndex))
     else scrollItemIntoView(connectRow)
   }
 
@@ -185,6 +205,7 @@ Panel {
   }
 
   onRemotesChanged: clampCursor()
+  onUnmanagedRemotesChanged: clampCursor()
 
   IpcHandler {
     target: root.ipcTarget
@@ -293,6 +314,7 @@ Panel {
             spacing: Style.space(6)
 
             Repeater {
+              id: remoteRepeater
               model: root.rcloneInstalled ? root.remotes : []
               RemoteRow {
                 required property var modelData
@@ -304,8 +326,44 @@ Panel {
             }
           }
 
+          Column {
+            id: importColumn
+            visible: root.rcloneInstalled && root.unmanagedRemotes.length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              text: "Existing rclone services"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Repeater {
+              id: importRepeater
+              model: root.rcloneInstalled ? root.unmanagedRemotes : []
+              ActionRow {
+                required property var modelData
+                required property int index
+                width: importColumn.width
+                glyph: Model.GLYPH_ADD
+                title: "Import " + String(modelData.label || modelData.name)
+                subtitle: "Use existing rclone remote " + String(modelData.name)
+                hasCursor: root.cursorActive &&
+                  root.cursorIndex === root.importStartIndex + index
+                onTriggered: root.importService(modelData)
+                onHoveredIn: {
+                  root.cursorActive = true
+                  root.cursorIndex = root.importStartIndex + index
+                }
+              }
+            }
+          }
+
           Text {
-            visible: root.rcloneInstalled && root.remotes.length === 0
+            visible: root.rcloneInstalled && root.remotes.length === 0 &&
+              root.unmanagedRemotes.length === 0
             width: parent.width
             text: "Connect Google Drive, Dropbox or OneDrive to browse it in Files."
             color: root.dim
@@ -326,7 +384,7 @@ Panel {
             width: parent.width
             glyph: Model.GLYPH_ADD
             title: "Connect a service…"
-            subtitle: "Sign in and mount it as a folder"
+            subtitle: "Sign in and mount a new service as a folder"
             hasCursor: root.cursorActive && root.rcloneInstalled && root.cursorIndex === root.connectIndex
             onTriggered: root.connectService()
             onHoveredIn: {

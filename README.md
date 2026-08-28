@@ -35,6 +35,12 @@ Click the cloud icon in the bar, then **Connect a service…**. A terminal opens
 and asks which provider to use, what to call the folder, and any credentials or
 provider-specific choices it needs.
 
+If rclone already has a configured service, it appears under **Existing rclone
+services**. Choose **Import** to validate and adopt it. Import writes only the
+plugin's non-secret ownership record; it does not change the rclone credentials.
+An existing remote that fails validation is left untouched and the terminal
+shows the provider error and suggests repairing it with `rclone config`.
+
 For another rclone backend, choose **Something else (guided by rclone)** and
 enter its backend name. rclone then asks the complete provider-specific set of
 questions; for example, SFTP asks for its host and user instead of silently
@@ -51,7 +57,9 @@ After `rclone` is available, all runtime state is user-level and stays under
 your home directory. The plugin creates or updates only its namespaced files,
 its generated user service, and the bookmark lines for services you connect.
 It refuses to replace a service file that does not carry the plugin's ownership
-marker. Existing rclone remotes not created by this plugin are ignored.
+marker. Existing rclone remotes not created by this plugin are shown as
+import candidates, but they are never managed until the user explicitly
+imports them.
 
 | Path | What |
 |------|------|
@@ -155,6 +163,7 @@ Plugin helpers stay inside the installed checkout rather than modifying your
 CLOUD_PLUGIN="$HOME/.config/omarchy/plugins/furmware.cloud"
 
 "$CLOUD_PLUGIN/bin/omarchy-cloud-connect"                   # setup wizard
+"$CLOUD_PLUGIN/bin/omarchy-cloud-import" onedrive           # adopt an existing rclone remote
 "$CLOUD_PLUGIN/bin/omarchy-cloud-configure" gdrive          # service settings
 "$CLOUD_PLUGIN/bin/omarchy-cloud-reconnect" gdrive          # re-run sign-in
 

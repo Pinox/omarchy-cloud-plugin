@@ -12,6 +12,7 @@ REPO = Path(__file__).resolve().parents[1]
 MOUNT = REPO / "bin" / "omarchy-cloud-mount"
 BOOKMARK = REPO / "bin" / "omarchy-cloud-bookmark"
 UNINSTALL = REPO / "bin" / "omarchy-cloud-uninstall"
+IMPORT = REPO / "bin" / "omarchy-cloud-import"
 
 
 class ShellHelperTests(unittest.TestCase):
@@ -172,6 +173,124 @@ printf '%s\\n' "$@" >"$TEST_LOG"
         config_index = arguments.index("--config")
         self.assertEqual(arguments[config_index + 1], str(custom_config))
         self.assertNotIn(str(self.home / ".config/rclone/rclone.conf"), arguments)
+
+    def test_import_adopts_a_valid_existing_remote_without_copying_credentials(self):
+        import_bin = self.root / "import-bin"
+        import_bin.mkdir()
+        shutil.copy2(IMPORT, import_bin / "omarchy-cloud-import")
+        shutil.copy2(
+            REPO / "bin" / "omarchy-cloud-ui.sh", import_bin / "omarchy-cloud-ui.sh"
+        )
+        (import_bin / "omarchy-cloud-import").chmod(0o755)
+
+        event_log = self.root / "events.log"
+        env = self.env | {"TEST_LOG": str(event_log)}
+        self.executable(
+            "gum",
+            """#!/bin/bash
+case "$1" in
+  style) shift; printf '%s\\n' "$*" ;;
+  spin) exit 0 ;;
+esac
+""",
+        )
+        self.executable(
+            "rclone",
+            """#!/bin/bash
+if [[ "$1" == "listremotes" ]]; then
+  printf 'onedrive:\\n'
+  exit 0
+fi
+if [[ "$1" == "config" && "$2" == "redacted" ]]; then
+  printf '[onedrive]\\ntype = onedrive\\ntoken = XXX\\n'
+  exit 0
+fi
+if [[ "$1" == "lsd" ]]; then exit 0; fi
+exit 1
+""",
+        )
+        (import_bin / "omarchy-cloud-mount").write_text(
+            "#!/bin/bash\nprintf 'mount %s\\n' \"$*\" >>\"$TEST_LOG\"\n",
+            encoding="utf-8",
+        )
+        (import_bin / "omarchy-cloud-mount").chmod(0o755)
+        (import_bin / "omarchy-cloud-bookmark").write_text(
+            "#!/bin/bash\nprintf 'bookmark %s\\n' \"$*\" >>\"$TEST_LOG\"\n",
+            encoding="utf-8",
+        )
+        (import_bin / "omarchy-cloud-bookmark").chmod(0o755)
+
+        result = self.run_script(
+            import_bin / "omarchy-cloud-import", "onedrive", env=env
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = self.config / "omarchy-cloud/remotes/onedrive.conf"
+        self.assertEqual(
+            metadata.read_text(encoding="utf-8"),
+            "# Written by omarchy-cloud-import for the onedrive remote.\n"
+            "# extra_flags is appended to the rclone mount command line.\n"
+            "label=OneDrive\nextra_flags=''\n",
+        )
+        self.assertNotIn("XXX", metadata.read_text(encoding="utf-8"))
+        events = event_log.read_text(encoding="utf-8")
+        self.assertIn("mount install-unit", events)
+        self.assertIn("mount enable onedrive", events)
+        self.assertIn(
+            f"bookmark add {self.home}/Cloud/onedrive OneDrive", events
+        )
+
+    def test_import_rejects_an_existing_remote_that_needs_repair(self):
+        import_bin = self.root / "import-bin"
+        import_bin.mkdir()
+        shutil.copy2(IMPORT, import_bin / "omarchy-cloud-import")
+        shutil.copy2(
+            REPO / "bin" / "omarchy-cloud-ui.sh", import_bin / "omarchy-cloud-ui.sh"
+        )
+        (import_bin / "omarchy-cloud-import").chmod(0o755)
+
+        event_log = self.root / "events.log"
+        env = self.env | {"TEST_LOG": str(event_log)}
+        self.executable(
+            "gum",
+            """#!/bin/bash
+case "$1" in
+  style) shift; printf '%s\\n' "$*" ;;
+  spin) exit 0 ;;
+esac
+""",
+        )
+        self.executable(
+            "rclone",
+            """#!/bin/bash
+if [[ "$1" == "listremotes" ]]; then printf 'old-onedrive:\\n'; exit 0; fi
+if [[ "$1" == "config" && "$2" == "redacted" ]]; then
+  printf '[old-onedrive]\\ntype = onedrive\\ntoken = XXX\\n'; exit 0
+fi
+if [[ "$1" == "lsd" ]]; then
+  printf 'unable to get drive_id and drive_type\\n' >&2
+  exit 1
+fi
+exit 1
+""",
+        )
+        (import_bin / "omarchy-cloud-mount").write_text(
+            "#!/bin/bash\nprintf 'mount %s\\n' \"$*\" >>\"$TEST_LOG\"\n",
+            encoding="utf-8",
+        )
+        (import_bin / "omarchy-cloud-mount").chmod(0o755)
+
+        result = self.run_script(
+            import_bin / "omarchy-cloud-import", "old-onedrive", env=env
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not open", result.stdout.lower())
+        self.assertIn("drive_id and drive_type", result.stdout)
+        self.assertFalse(
+            (self.config / "omarchy-cloud/remotes/old-onedrive.conf").exists()
+        )
+        self.assertFalse(event_log.exists(), "mount must not start before validation")
 
     def test_bookmark_percent_encodes_utf8_bytes(self):
         result = self.run_script(BOOKMARK, "add", "/tmp/Café Cloud", "Café")
