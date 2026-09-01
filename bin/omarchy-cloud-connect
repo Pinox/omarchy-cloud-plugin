@@ -240,8 +240,96 @@ choose_credentials() {
   esac
 }
 
+configure_onedrive_with_rclone() {
+  [[ "$PROVIDER_TYPE" == "onedrive" ]] || return 1
+
+  local confirmed="${1:-false}"
+  if [[ "$confirmed" != "true" ]]; then
+    echo
+    warn "OneDrive returned an invalid drive response."
+    echo "Use rclone's full configuration menu to edit this remote or create a new one."
+    echo
+    gum confirm --default=false "Configure OneDrive with rclone now?" || return 1
+  fi
+
+  heading "Configure OneDrive with rclone"
+  echo "In rclone's menu, edit or create the remote named '$REMOTE_NAME'."
+  echo
+  if ! rclone config; then
+    # Keep the remote visible as an unmanaged import candidate so the user can
+    # repair it later instead of silently deleting the credentials they just
+    # tried to fix.
+    CREATED_REMOTE=""
+    bad "rclone configuration did not complete. The OneDrive remote was kept."
+    return 2
+  fi
+
+  # Unlike the normal OAuth check, this recovery path specifically verifies
+  # that Microsoft accepts the drive handle before continuing to mount it.
+  if ! remote_works "$REMOTE_NAME"; then
+    CREATED_REMOTE=""
+    bad "OneDrive still could not be opened after rclone configuration."
+    echo "The remote was kept. Retry importing it after fixing the drive in rclone."
+    return 2
+  fi
+
+  good "OneDrive configuration works."
+  return 0
+}
+
+run_onedrive_create() {
+  local output_file pid status
+  output_file="$(mktemp "${TMPDIR:-/tmp}/omarchy-cloud-onedrive.XXXXXX")" ||
+    return 1
+
+  # rclone may keep retrying an invalid ObjectHandle inside `config create`,
+  # even when the command-level retry flags are zero. Tee its live output so
+  # the user still sees the OAuth notices, but regain control as soon as the
+  # provider reports the known invalid-drive response.
+  rclone "$@" > >(tee "$output_file") 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if grep -Fq "Failed to query root for drive" "$output_file"; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      sleep 0.1
+      rm -f "$output_file"
+      return 2
+    fi
+    sleep 0.1
+  done
+
+  wait "$pid" 2>/dev/null
+  status=$?
+  sleep 0.1
+  if grep -Fq "Failed to query root for drive" "$output_file"; then
+    status=2
+  fi
+  rm -f "$output_file"
+  return "$status"
+}
+
 create_remote() {
   heading "Connecting $PROVIDER_LABEL"
+
+  # OneDrive's guided `config create` can enter a provider retry loop before
+  # returning control to this script. Offer the full rclone menu up front so a
+  # user with an invalid drive handle can resolve it immediately.
+  if [[ "$PROVIDER_TYPE" == "onedrive" ]]; then
+    echo "You can configure OneDrive directly with rclone before the guided setup."
+    echo
+    if gum confirm --default=false "Configure OneDrive with rclone now?"; then
+      local configure_status=0
+      configure_onedrive_with_rclone true || configure_status=$?
+      if ((configure_status == 0)); then
+        return 0
+      elif ((configure_status == 2)); then
+        abort "OneDrive configuration was kept. Retry importing it after fixing the remote."
+      else
+        abort "rclone configuration did not complete. The OneDrive remote was kept."
+      fi
+    fi
+  fi
 
   local -a create_args=(config create "$REMOTE_NAME" "$PROVIDER_TYPE")
   # Ask for the whole drive rather than rclone's narrower default, so files
@@ -288,10 +376,51 @@ create_remote() {
     # accepting unusable empty defaults. Keep completed secrets off the screen.
     local -a create_options=(--no-output)
     [[ "$CUSTOM_PROVIDER" == "true" ]] && create_options=(--all --no-output)
-    if ! rclone "${create_args[@]}" "${create_options[@]}"; then
+    # A stale OneDrive drive handle can make rclone retry the same invalid
+    # ObjectHandle several times before returning. The setup wizard needs to
+    # regain control after the first provider failure so it can offer the
+    # full rclone configuration menu.
+    [[ "$PROVIDER_TYPE" == "onedrive" ]] &&
+      create_options+=(--retries 0 --low-level-retries 0 --retries-sleep 0s)
+    local create_status=0
+    if [[ "$PROVIDER_TYPE" == "onedrive" ]]; then
+      run_onedrive_create "${create_args[@]}" "${create_options[@]}" ||
+        create_status=$?
+    else
+      rclone "${create_args[@]}" "${create_options[@]}" || create_status=$?
+    fi
+    if ((create_status != 0)); then
+      local configure_status=1
+      if [[ "$PROVIDER_TYPE" == "onedrive" ]]; then
+        configure_status=0
+        configure_onedrive_with_rclone || configure_status=$?
+      fi
+      if ((configure_status == 0)); then
+        :
+      elif ((configure_status == 2)); then
+        abort "OneDrive configuration was kept. Retry importing it after fixing the remote."
+      else
+        cleanup_partial
+        CREATED_REMOTE=""
+        abort "rclone could not create the remote. Try 'rclone config' by hand."
+      fi
+    fi
+  fi
+
+  # OneDrive can print an invalid ObjectHandle response during `config create`
+  # while still returning success. Check the root explicitly before treating
+  # the presence of an OAuth token as a usable connection.
+  if [[ "$PROVIDER_TYPE" == "onedrive" ]] && ! remote_works "$REMOTE_NAME"; then
+    local configure_status=0
+    configure_onedrive_with_rclone || configure_status=$?
+    if ((configure_status == 0)); then
+      :
+    elif ((configure_status == 2)); then
+      abort "OneDrive configuration was kept. Retry importing it after fixing the remote."
+    else
       cleanup_partial
       CREATED_REMOTE=""
-      abort "rclone could not create the remote. Try 'rclone config' by hand."
+      abort "OneDrive could not open the remote. Try 'rclone config' by hand."
     fi
   fi
 
@@ -305,6 +434,15 @@ create_remote() {
   # Offer one retry rather than silently leaving a remote that cannot work.
   warn "Sign-in didn't complete."
   echo
+  if [[ "$PROVIDER_TYPE" == "onedrive" ]]; then
+    local configure_status=0
+    configure_onedrive_with_rclone || configure_status=$?
+    if ((configure_status == 0)); then
+      return 0
+    elif ((configure_status == 2)); then
+      abort "OneDrive configuration was kept. Retry importing it after fixing the remote."
+    fi
+  fi
   gum confirm --default=false "Try signing in again?" || { cleanup_partial; abort "Cancelled."; }
 
   # iCloud needs the explicit state driver for its new 2FA code. OAuth

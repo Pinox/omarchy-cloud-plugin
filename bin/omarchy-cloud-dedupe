@@ -1,0 +1,101 @@
+#!/bin/bash
+#
+# Find and delete exact-content duplicates in a managed OneDrive remote.
+#
+# rclone's `--by-hash` mode is intentional: files with the same name but
+# different contents are not safe to remove, and are left alone. The preview
+# is read-only; the destructive pass happens only after an explicit prompt.
+#
+set -uo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-cloud"
+REMOTE_DIR="$CONFIG_DIR/remotes"
+BIN_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+MOUNT="$BIN_DIR/omarchy-cloud-mount"
+
+# shellcheck source=omarchy-cloud-ui.sh
+source "$BIN_DIR/omarchy-cloud-ui.sh"
+trap hold_open EXIT
+
+name="${1:-}"
+if [[ -z "$name" || ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+  bad "Usage: omarchy-cloud-dedupe <managed-onedrive-remote>"
+  exit 1
+fi
+
+remote_file="$REMOTE_DIR/$name.conf"
+if [[ ! -f "$remote_file" || -L "$remote_file" ]]; then
+  bad "'$name' is not managed by Omarchy Cloud."
+  exit 1
+fi
+
+if ! command -v rclone >/dev/null 2>&1; then
+  bad "rclone is not installed."
+  exit 1
+fi
+
+remote_type="$(rclone config show "$name" 2>/dev/null |
+  awk -F' = ' '/^type/ {print $2; exit}')"
+if [[ "$remote_type" != "onedrive" ]]; then
+  bad "Duplicate cleanup is currently available only for OneDrive remotes."
+  exit 1
+fi
+
+was_active=false
+if "$MOUNT" is-active "$name" 2>/dev/null; then
+  was_active=true
+  if ! "$MOUNT" stop "$name"; then
+    bad "Could not stop the OneDrive mount safely; no files were changed."
+    exit 1
+  fi
+fi
+
+restore_mount() {
+  [[ "$was_active" == "true" ]] || return 0
+  if "$MOUNT" start "$name" >/dev/null 2>&1; then
+    was_active=false
+    return 0
+  fi
+  warn "The duplicate scan finished, but the OneDrive mount could not be restarted."
+  return 1
+}
+
+heading "Finding identical OneDrive files"
+preview_output="$(rclone dedupe --by-hash --dedupe-mode list "$name:" 2>&1)"
+preview_status=$?
+if ((preview_status != 0)); then
+  bad "Could not scan '$name' for duplicates."
+  [[ -n "$preview_output" ]] && printf '%s\n' "$preview_output" | tail -n 12
+  restore_mount || true
+  exit 1
+fi
+
+if [[ -z "$preview_output" ]]; then
+  good "No exact-content duplicates were found."
+  restore_mount || true
+  exit 0
+fi
+
+echo ""
+echo "The following exact-content duplicates were found:"
+printf '%s\n' "$preview_output"
+echo
+echo "The newest copy in each group will be kept."
+echo "Files removed from OneDrive normally go to its recycle bin."
+echo
+
+if ! gum confirm --default=false "Delete the older duplicate copies?"; then
+  say "No files were deleted."
+  restore_mount || true
+  exit 0
+fi
+
+heading "Deleting duplicate files"
+if ! rclone dedupe --by-hash --dedupe-mode newest "$name:"; then
+  bad "Duplicate cleanup did not complete."
+  restore_mount || true
+  exit 1
+fi
+
+good "Deleted older exact-content duplicates; the newest copy in each group was kept."
+restore_mount || exit 1

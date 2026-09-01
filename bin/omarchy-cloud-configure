@@ -12,6 +12,7 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-cloud"
 REMOTE_DIR="$CONFIG_DIR/remotes"
 BIN_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 MOUNT="$BIN_DIR/omarchy-cloud-mount"
+DEDUPE="$BIN_DIR/omarchy-cloud-dedupe"
 
 # shellcheck source=omarchy-cloud-ui.sh
 source "$BIN_DIR/omarchy-cloud-ui.sh"
@@ -200,6 +201,10 @@ configure_flags() {
   good "Saved."
 }
 
+deduplicate_onedrive() {
+  "$DEDUPE" "$REMOTE_NAME"
+}
+
 disconnect_service() {
   heading "Disconnect $label"
   echo "This unmounts it, deletes the saved sign-in, and removes its bookmark."
@@ -231,6 +236,7 @@ main() {
     fi
     options+=("Mount at login")
     options+=("Extra rclone flags")
+    [[ "$REMOTE_TYPE" == "onedrive" ]] && options+=("Delete duplicate files")
     options+=("Disconnect this service")
     options+=("Close")
 
@@ -242,6 +248,7 @@ main() {
       "Google credentials"*)     configure_credentials ;;
       "Mount at login")          configure_autostart ;;
       "Extra rclone flags")      configure_flags ;;
+      "Delete duplicate files")  deduplicate_onedrive ;;
       "Disconnect this service") disconnect_service ;;
       *)                         exit 0 ;;
     esac
