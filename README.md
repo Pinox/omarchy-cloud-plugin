@@ -35,11 +35,25 @@ Click the cloud icon in the bar, then **Connect a service…**. A terminal opens
 and asks which provider to use, what to call the folder, and any credentials or
 provider-specific choices it needs.
 
+If the first OneDrive setup returns an invalid drive response such as
+`ObjectHandle is Invalid`, the wizard offers **Configure OneDrive with rclone
+now?**. Choosing Yes opens the full `rclone config` menu, then verifies the
+remote before continuing. Choosing No keeps the normal retry flow.
+
 If rclone already has a configured service, it appears under **Existing rclone
 services**. Choose **Import** to validate and adopt it. Import writes only the
 plugin's non-secret ownership record; it does not change the rclone credentials.
-An existing remote that fails validation is left untouched and the terminal
-shows the provider error and suggests repairing it with `rclone config`.
+If an existing OneDrive remote fails validation, Import offers to delete that
+broken local rclone config and its saved sign-in. It does not delete anything
+stored in OneDrive. After deletion, create a fresh OneDrive remote with
+`rclone config`, then import it from the Cloud panel. Other failed remotes are
+left untouched and the terminal shows the provider error.
+
+Existing OneDrive candidates also have a delete button beside Import, so a
+broken remote can be removed without first running the import check.
+Failed OneDrive imports also offer **Configure with rclone?**, which opens the
+interactive `rclone config` menu and leaves the remote in place for another
+import attempt.
 
 For another rclone backend, choose **Something else (guided by rclone)** and
 enter its backend name. rclone then asks the complete provider-specific set of
@@ -127,6 +141,10 @@ permanent:
 - **Google Docs handling** (Drive only) — the three options above
 - **Mount at login** — on or off
 - **Extra rclone flags** — anything from that backend's rclone page
+- **Delete duplicate files** (OneDrive) — preview exact-content duplicates,
+  then delete older copies while keeping the newest one. Files with the same
+  name but different contents are not touched. The mount is stopped during the
+  scan and restored afterwards.
 - **Disconnect this service** — unmount, delete the saved sign-in, drop the
   bookmark. Nothing in the cloud is touched.
 
@@ -164,8 +182,10 @@ CLOUD_PLUGIN="$HOME/.config/omarchy/plugins/furmware.cloud"
 
 "$CLOUD_PLUGIN/bin/omarchy-cloud-connect"                   # setup wizard
 "$CLOUD_PLUGIN/bin/omarchy-cloud-import" onedrive           # adopt an existing rclone remote
+"$CLOUD_PLUGIN/bin/omarchy-cloud-import" onedrive --delete  # remove an unmanaged OneDrive config
 "$CLOUD_PLUGIN/bin/omarchy-cloud-configure" gdrive          # service settings
 "$CLOUD_PLUGIN/bin/omarchy-cloud-reconnect" gdrive          # re-run sign-in
+"$CLOUD_PLUGIN/bin/omarchy-cloud-dedupe" onedrive          # preview/delete OneDrive duplicates
 
 "$CLOUD_PLUGIN/bin/omarchy-cloud-mount" status --with-quota # panel JSON
 "$CLOUD_PLUGIN/bin/omarchy-cloud-mount" enable gdrive       # now + at login

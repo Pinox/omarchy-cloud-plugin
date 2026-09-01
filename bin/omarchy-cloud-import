@@ -21,8 +21,10 @@ source "$BIN_DIR/omarchy-cloud-ui.sh"
 trap hold_open EXIT
 
 name="${1:-}"
-if [[ -z "$name" || ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
-  bad "Usage: omarchy-cloud-import <existing-rclone-remote>"
+action="${2:-}"
+if [[ -z "$name" || ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ||
+      ( -n "$action" && "$action" != "--delete" ) || -n "${3:-}" ]]; then
+  bad "Usage: omarchy-cloud-import <existing-rclone-remote> [--delete]"
   exit 1
 fi
 
@@ -47,6 +49,45 @@ if [[ -z "$remote_type" ]]; then
   exit 1
 fi
 
+delete_unmanaged_onedrive() {
+  heading "Delete existing OneDrive config"
+  echo "This deletes only the local rclone entry and saved sign-in."
+  echo "Nothing stored in OneDrive will be deleted."
+  echo
+  if ! gum confirm --default=false "Delete the '$name' rclone config?"; then
+    say "No files or configuration were deleted."
+    return 1
+  fi
+
+  if ! rclone config delete "$name" >/dev/null 2>&1; then
+    bad "Could not delete '$name'; its rclone config was kept."
+    return 1
+  fi
+
+  if ! remaining_remotes="$(rclone listremotes 2>/dev/null)" ||
+      grep -Fqx "$name:" <<<"$remaining_remotes"; then
+    bad "Could not verify that '$name' was deleted from rclone."
+    return 1
+  fi
+
+  good "Removed the local OneDrive rclone config."
+  echo
+  echo "Create a new OneDrive remote with:"
+  echo "  rclone config"
+  echo "Choose n (New remote), then Microsoft OneDrive, sign in, and"
+  echo "select the correct OneDrive Personal or Business drive."
+  echo "After it works, return to the Cloud panel and import the new remote."
+}
+
+if [[ "$action" == "--delete" ]]; then
+  if [[ "$remote_type" != "onedrive" ]]; then
+    bad "The --delete action is only available for OneDrive remotes."
+    exit 1
+  fi
+  delete_unmanaged_onedrive
+  exit $?
+fi
+
 heading "Checking $name"
 probe_output=""
 if ! probe_output="$(rclone lsd "$name:" --max-depth 1 \
@@ -54,7 +95,25 @@ if ! probe_output="$(rclone lsd "$name:" --max-depth 1 \
   bad "rclone could not open '$name'."
   [[ -n "$probe_output" ]] && printf '%s\n' "$probe_output" | tail -n 8
   echo
-  say "Repair the remote with 'rclone config' or sign in again, then retry import."
+  if [[ "$remote_type" == "onedrive" ]]; then
+    echo "You can reconfigure this remote with rclone before removing it."
+    echo
+    if gum confirm --default=false "Configure with rclone now?"; then
+      heading "Configure OneDrive with rclone"
+      echo "Use rclone's menu to edit this remote or create a new OneDrive remote."
+      echo
+      if rclone config; then
+        good "rclone configuration finished. Retry importing the OneDrive remote."
+        exit 0
+      fi
+      bad "rclone configuration did not complete. The remote was kept."
+      exit 1
+    fi
+    delete_unmanaged_onedrive
+    exit $?
+  else
+    say "Repair the remote with 'rclone config' or sign in again, then retry import."
+  fi
   exit 1
 fi
 

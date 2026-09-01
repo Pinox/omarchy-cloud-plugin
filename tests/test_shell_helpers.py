@@ -13,6 +13,8 @@ MOUNT = REPO / "bin" / "omarchy-cloud-mount"
 BOOKMARK = REPO / "bin" / "omarchy-cloud-bookmark"
 UNINSTALL = REPO / "bin" / "omarchy-cloud-uninstall"
 IMPORT = REPO / "bin" / "omarchy-cloud-import"
+DEDUPE = REPO / "bin" / "omarchy-cloud-dedupe"
+CONNECT = REPO / "bin" / "omarchy-cloud-connect"
 
 
 class ShellHelperTests(unittest.TestCase):
@@ -240,7 +242,7 @@ exit 1
             f"bookmark add {self.home}/Cloud/onedrive OneDrive", events
         )
 
-    def test_import_rejects_an_existing_remote_that_needs_repair(self):
+    def test_failed_onedrive_import_can_delete_broken_config(self):
         import_bin = self.root / "import-bin"
         import_bin.mkdir()
         shutil.copy2(IMPORT, import_bin / "omarchy-cloud-import")
@@ -250,11 +252,19 @@ exit 1
         (import_bin / "omarchy-cloud-import").chmod(0o755)
 
         event_log = self.root / "events.log"
-        env = self.env | {"TEST_LOG": str(event_log)}
+        deleted_marker = self.root / "deleted"
+        env = self.env | {
+            "TEST_LOG": str(event_log),
+            "DELETED_MARKER": str(deleted_marker),
+        }
         self.executable(
             "gum",
             """#!/bin/bash
 case "$1" in
+  confirm)
+    [[ "$*" == *"Configure with rclone"* ]] && exit 1
+    exit 0
+    ;;
   style) shift; printf '%s\\n' "$*" ;;
   spin) exit 0 ;;
 esac
@@ -263,9 +273,18 @@ esac
         self.executable(
             "rclone",
             """#!/bin/bash
-if [[ "$1" == "listremotes" ]]; then printf 'old-onedrive:\\n'; exit 0; fi
+if [[ "$1" == "listremotes" ]]; then
+  if [[ -f "$DELETED_MARKER" ]]; then exit 0; fi
+  printf 'old-onedrive:\\n'
+  exit 0
+fi
 if [[ "$1" == "config" && "$2" == "redacted" ]]; then
   printf '[old-onedrive]\\ntype = onedrive\\ntoken = XXX\\n'; exit 0
+fi
+if [[ "$1" == "config" && "$2" == "delete" ]]; then
+  printf 'rclone %s\\n' "$*" >>"$TEST_LOG"
+  touch "$DELETED_MARKER"
+  exit 0
 fi
 if [[ "$1" == "lsd" ]]; then
   printf 'unable to get drive_id and drive_type\\n' >&2
@@ -284,13 +303,135 @@ exit 1
             import_bin / "omarchy-cloud-import", "old-onedrive", env=env
         )
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("could not open", result.stdout.lower())
         self.assertIn("drive_id and drive_type", result.stdout)
+        self.assertIn("rclone config", result.stdout)
+        self.assertTrue(deleted_marker.exists())
         self.assertFalse(
             (self.config / "omarchy-cloud/remotes/old-onedrive.conf").exists()
         )
-        self.assertFalse(event_log.exists(), "mount must not start before validation")
+        self.assertNotIn("mount", event_log.read_text(encoding="utf-8"))
+
+    def test_failed_onedrive_import_can_open_rclone_config(self):
+        import_bin = self.root / "import-bin"
+        import_bin.mkdir()
+        shutil.copy2(IMPORT, import_bin / "omarchy-cloud-import")
+        shutil.copy2(
+            REPO / "bin" / "omarchy-cloud-ui.sh", import_bin / "omarchy-cloud-ui.sh"
+        )
+        (import_bin / "omarchy-cloud-import").chmod(0o755)
+
+        event_log = self.root / "events.log"
+        env = self.env | {"TEST_LOG": str(event_log)}
+        self.executable(
+            "gum",
+            """#!/bin/bash
+case "$1" in
+  confirm) exit 0 ;;
+  style) shift; printf '%s\\n' "$*" ;;
+  spin) exit 0 ;;
+esac
+""",
+        )
+        self.executable(
+            "rclone",
+            """#!/bin/bash
+if [[ "$1" == "listremotes" ]]; then
+  printf 'old-onedrive:\\n'
+  exit 0
+fi
+if [[ "$1" == "config" && "$2" == "redacted" ]]; then
+  printf '[old-onedrive]\\ntype = onedrive\\ntoken = XXX\\n'
+  exit 0
+fi
+if [[ "$1" == "lsd" ]]; then
+  printf 'unable to get drive_id and drive_type\\n' >&2
+  exit 1
+fi
+if [[ "$1" == "config" && "$#" -eq 1 ]]; then
+  printf 'rclone config\\n' >>"$TEST_LOG"
+  exit 0
+fi
+exit 1
+""",
+        )
+
+        result = self.run_script(
+            import_bin / "omarchy-cloud-import", "old-onedrive", env=env
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = event_log.read_text(encoding="utf-8")
+        self.assertIn("rclone config", events)
+        self.assertNotIn("config delete", events)
+        self.assertIn("Retry importing", result.stdout)
+
+    def test_onedrive_dedupe_previews_then_keeps_newest_copy(self):
+        self.managed_remote("onedrive")
+        dedupe_bin = self.root / "dedupe-bin"
+        dedupe_bin.mkdir()
+        shutil.copy2(DEDUPE, dedupe_bin / "omarchy-cloud-dedupe")
+        shutil.copy2(
+            REPO / "bin" / "omarchy-cloud-ui.sh", dedupe_bin / "omarchy-cloud-ui.sh"
+        )
+        (dedupe_bin / "omarchy-cloud-dedupe").chmod(0o755)
+
+        event_log = self.root / "events.log"
+        env = self.env | {"TEST_LOG": str(event_log)}
+        self.executable(
+            "gum",
+            """#!/bin/bash
+case "$1" in
+  confirm) exit 0 ;;
+  style) shift; printf '%s\\n' "$*" ;;
+  spin) exit 0 ;;
+esac
+""",
+        )
+        self.executable(
+            "rclone",
+            """#!/bin/bash
+if [[ "$1" == "config" && "$2" == "show" ]]; then
+  printf 'type = onedrive\\n'
+  exit 0
+fi
+if [[ "$1" == "dedupe" ]]; then
+  printf 'duplicate-content-group\\n'
+  printf 'rclone %s\\n' "$*" >>"$TEST_LOG"
+  exit 0
+fi
+exit 1
+""",
+        )
+        (dedupe_bin / "omarchy-cloud-mount").write_text(
+            """#!/bin/bash
+printf 'mount %s\\n' "$*" >>"$TEST_LOG"
+case "$1" in
+  is-active) exit 0 ;;
+  stop|start) exit 0 ;;
+esac
+exit 1
+""",
+            encoding="utf-8",
+        )
+        (dedupe_bin / "omarchy-cloud-mount").chmod(0o755)
+
+        result = self.run_script(
+            dedupe_bin / "omarchy-cloud-dedupe", "onedrive", env=env
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = event_log.read_text(encoding="utf-8")
+        self.assertIn("mount stop onedrive", events)
+        self.assertIn("mount start onedrive", events)
+        self.assertIn(
+            "rclone dedupe --by-hash --dedupe-mode list onedrive:", events
+        )
+        self.assertIn(
+            "rclone dedupe --by-hash --dedupe-mode newest onedrive:", events
+        )
+        self.assertIn("newest copy", result.stdout)
 
     def test_bookmark_percent_encodes_utf8_bytes(self):
         result = self.run_script(BOOKMARK, "add", "/tmp/Café Cloud", "Café")
@@ -300,6 +441,180 @@ exit 1
         self.assertEqual(
             bookmarks.read_text(encoding="utf-8"),
             "file:///tmp/Caf%C3%A9%20Cloud Café\n",
+        )
+
+    def test_first_onedrive_config_can_open_rclone_config_after_invalid_drive(self):
+        wizard_bin = self.root / "wizard-bin"
+        wizard_bin.mkdir()
+        for name in (
+            "omarchy-cloud-connect",
+            "omarchy-cloud-ui.sh",
+            "omarchy-cloud-rclone-config.sh",
+        ):
+            shutil.copy2(REPO / "bin" / name, wizard_bin / name)
+
+        event_log = self.root / "events.log"
+        configured_marker = self.root / "configured"
+        confirm_count = self.root / "confirm-count"
+        env = self.env | {
+            "TEST_LOG": str(event_log),
+            "CONFIGURED_MARKER": str(configured_marker),
+            "CONFIRM_COUNT": str(confirm_count),
+        }
+        self.executable(
+            "gum",
+            """#!/bin/bash
+case "$1" in
+  choose) printf '%s\\n' 'OneDrive' ;;
+  input) printf '%s\\n' 'onedrive' ;;
+  confirm)
+    count=0
+    [[ -f "$CONFIRM_COUNT" ]] && count="$(<"$CONFIRM_COUNT")"
+    count=$((count + 1))
+    printf '%s' "$count" >"$CONFIRM_COUNT"
+    [[ "$*" == *"Configure OneDrive"* && "$count" -gt 1 ]] && exit 0
+    exit 1
+    ;;
+  style) shift; printf '%s\\n' "$*" ;;
+  spin) exit 0 ;;
+esac
+""",
+        )
+        self.executable(
+            "rclone",
+            """#!/bin/bash
+if [[ "$1" == "listremotes" ]]; then
+  [[ -f "$CONFIGURED_MARKER" ]] && printf 'onedrive:\\n'
+  exit 0
+fi
+if [[ "$1" == "config" && "$2" == "create" ]]; then
+  touch "$CONFIGURED_MARKER"
+  printf 'Failed to query root for drive "b!broken": HTTP error 400 (400 Bad Request) returned body: {"error":{"code":"invalidRequest","message":"ObjectHandle is Invalid"}}\\n' >&2
+  exit 1
+fi
+if [[ "$1" == "config" && "$#" -eq 1 ]]; then
+  printf 'rclone config\\n' >>"$TEST_LOG"
+  exit 0
+fi
+if [[ "$1" == "config" && "$2" == "show" ]]; then
+  printf '[onedrive]\\ntype = onedrive\\ntoken = XXX\\n'
+  exit 0
+fi
+if [[ "$1" == "lsd" ]]; then exit 0; fi
+exit 1
+""",
+        )
+        (wizard_bin / "omarchy-cloud-mount").write_text(
+            "#!/bin/bash\nprintf 'mount %s\\n' \"$*\" >>\"$TEST_LOG\"\n",
+            encoding="utf-8",
+        )
+        (wizard_bin / "omarchy-cloud-mount").chmod(0o755)
+        (wizard_bin / "omarchy-cloud-bookmark").write_text(
+            "#!/bin/bash\nexit 0\n", encoding="utf-8"
+        )
+        (wizard_bin / "omarchy-cloud-bookmark").chmod(0o755)
+        self.executable("mountpoint", "#!/bin/bash\nexit 0\n")
+
+        result = self.run_script(wizard_bin / "omarchy-cloud-connect", env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("ObjectHandle is Invalid", result.stdout + result.stderr)
+        events = event_log.read_text(encoding="utf-8")
+        self.assertIn("rclone config\n", events)
+        self.assertNotIn("config delete", events)
+        self.assertTrue(
+            (self.config / "omarchy-cloud/remotes/onedrive.conf").is_file()
+        )
+
+    def test_first_onedrive_config_can_recover_when_create_returns_success(self):
+        wizard_bin = self.root / "wizard-bin"
+        wizard_bin.mkdir()
+        for name in (
+            "omarchy-cloud-connect",
+            "omarchy-cloud-ui.sh",
+            "omarchy-cloud-rclone-config.sh",
+        ):
+            shutil.copy2(REPO / "bin" / name, wizard_bin / name)
+
+        event_log = self.root / "events.log"
+        created_marker = self.root / "created"
+        fixed_marker = self.root / "fixed"
+        confirm_count = self.root / "confirm-count"
+        env = self.env | {
+            "TEST_LOG": str(event_log),
+            "CREATED_MARKER": str(created_marker),
+            "FIXED_MARKER": str(fixed_marker),
+            "CONFIRM_COUNT": str(confirm_count),
+        }
+        self.executable(
+            "gum",
+            """#!/bin/bash
+case "$1" in
+  choose) printf '%s\\n' 'OneDrive' ;;
+  input) printf '%s\\n' 'onedrive' ;;
+  confirm)
+    count=0
+    [[ -f "$CONFIRM_COUNT" ]] && count="$(<"$CONFIRM_COUNT")"
+    count=$((count + 1))
+    printf '%s' "$count" >"$CONFIRM_COUNT"
+    [[ "$*" == *"Configure OneDrive"* && "$count" -gt 1 ]] && exit 0
+    exit 1
+    ;;
+  style) shift; printf '%s\\n' "$*" ;;
+  spin) exit 0 ;;
+esac
+""",
+        )
+        self.executable(
+            "rclone",
+            """#!/bin/bash
+if [[ "$1" == "listremotes" ]]; then
+  [[ -f "$CREATED_MARKER" ]] && printf 'onedrive:\\n'
+  exit 0
+fi
+if [[ "$1" == "config" && "$2" == "create" ]]; then
+  touch "$CREATED_MARKER"
+  printf 'Failed to query root for drive "b!broken": HTTP error 400 (400 Bad Request) returned body: {"error":{"code":"invalidRequest","message":"ObjectHandle is Invalid"}}\\n' >&2
+  while :; do :; done
+fi
+if [[ "$1" == "config" && "$#" -eq 1 ]]; then
+  touch "$FIXED_MARKER"
+  printf 'rclone config\\n' >>"$TEST_LOG"
+  exit 0
+fi
+if [[ "$1" == "config" && "$2" == "show" ]]; then
+  printf '[onedrive]\\ntype = onedrive\\ntoken = XXX\\n'
+  exit 0
+fi
+if [[ "$1" == "lsd" ]]; then
+  if [[ ! -f "$FIXED_MARKER" ]]; then
+    printf 'Failed to query root for drive "b!broken": HTTP error 400 (400 Bad Request) returned body: {"error":{"code":"invalidRequest","message":"ObjectHandle is Invalid"}}\\n' >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 1
+""",
+        )
+        (wizard_bin / "omarchy-cloud-mount").write_text(
+            "#!/bin/bash\nprintf 'mount %s\\n' \"$*\" >>\"$TEST_LOG\"\n",
+            encoding="utf-8",
+        )
+        (wizard_bin / "omarchy-cloud-mount").chmod(0o755)
+        (wizard_bin / "omarchy-cloud-bookmark").write_text(
+            "#!/bin/bash\nexit 0\n", encoding="utf-8"
+        )
+        (wizard_bin / "omarchy-cloud-bookmark").chmod(0o755)
+        self.executable("mountpoint", "#!/bin/bash\nexit 0\n")
+
+        result = self.run_script(wizard_bin / "omarchy-cloud-connect", env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("ObjectHandle is Invalid", result.stdout + result.stderr)
+        events = event_log.read_text(encoding="utf-8")
+        self.assertIn("rclone config\n", events)
+        self.assertTrue(
+            (self.config / "omarchy-cloud/remotes/onedrive.conf").is_file()
         )
 
     def test_custom_backend_runs_the_full_rclone_question_flow(self):

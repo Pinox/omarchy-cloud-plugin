@@ -109,6 +109,12 @@ Panel {
     cloud.importService(remote)
   }
 
+  function deleteUnmanagedService(remote) {
+    if (!cloud) return
+    close()
+    cloud.deleteUnmanagedService(remote)
+  }
+
   function installRclone() {
     if (!cloud) return
     close()
@@ -349,10 +355,15 @@ Panel {
                 width: importColumn.width
                 glyph: Model.GLYPH_ADD
                 title: "Import " + String(modelData.label || modelData.name)
-                subtitle: "Use existing rclone remote " + String(modelData.name)
+                subtitle: modelData.type === "onedrive"
+                  ? "Import or remove existing remote " + String(modelData.name)
+                  : "Use existing rclone remote " + String(modelData.name)
+                actionIcon: modelData.type === "onedrive" ? Model.GLYPH_DELETE : ""
+                actionTooltip: "Delete existing OneDrive config"
                 hasCursor: root.cursorActive &&
                   root.cursorIndex === root.importStartIndex + index
                 onTriggered: root.importService(modelData)
+                onActionTriggered: root.deleteUnmanagedService(modelData)
                 onHoveredIn: {
                   root.cursorActive = true
                   root.cursorIndex = root.importStartIndex + index
@@ -404,7 +415,10 @@ Panel {
     property string glyph: ""
     property string title: ""
     property string subtitle: ""
+    property string actionIcon: ""
+    property string actionTooltip: ""
     signal triggered()
+    signal actionTriggered()
     signal hoveredIn()
 
     foreground: root.foreground
@@ -457,6 +471,17 @@ Panel {
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
+      }
+
+      PanelActionButton {
+        visible: actionRow.actionIcon !== ""
+        iconText: actionRow.actionIcon
+        tooltipText: actionRow.actionTooltip
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        enabled: root.cloud && !root.cloud.busy
+        Layout.alignment: Qt.AlignVCenter
+        onClicked: actionRow.actionTriggered()
       }
     }
   }

@@ -204,6 +204,13 @@ Item {
     runInTerminal("omarchy-cloud-import", [remote.name])
   }
 
+  function deleteUnmanagedService(remote) {
+    if (!remote || !remote.name || remote.type !== "onedrive") return
+    actionStatus = "Opening OneDrive config cleanup…"
+    actionStatusTimer.restart()
+    runInTerminal("omarchy-cloud-import", [remote.name, "--delete"])
+  }
+
   function configure(remote) {
     if (!remote || !remote.name) return
     actionStatus = "Opening settings…"
